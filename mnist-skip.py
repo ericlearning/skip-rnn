@@ -12,8 +12,9 @@ from modules.skip import SkipLSTM
 torch.backends.cudnn.benchmark = True
 
 bs = 64
-lr = 0.0001
+lr = 0.00001
 epoch_num = 10
+gradient_clip = False
 read_size = 1
 lambd = 0.00001
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -71,6 +72,8 @@ def train(dl, epoch_num):
         loss_budget = lambd * total_u
         loss = loss_ce + loss_budget
         loss.backward()
+        if gradient_clip != False:
+        	nn.utils.clip_grad_norm_(net.parameters(), gradient_clip)
         opt.step()
 
         writer.add_scalar('train loss', float(loss), epoch_num * dl_len + i)

@@ -15,6 +15,7 @@ torch.backends.cudnn.benchmark = True
 bs = 64
 lr = 0.0001
 epoch_num = 10
+gradient_clip = False
 read_size = 1
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
@@ -74,6 +75,8 @@ def train(dl, epoch_num):
         pred = net(x)
         loss = ce(pred, t)
         loss.backward()
+        if gradient_clip != False:
+        	nn.utils.clip_grad_norm_(net.parameters(), gradient_clip)
         opt.step()
 
         writer.add_scalar('train loss', float(loss), epoch_num * dl_len + i)
