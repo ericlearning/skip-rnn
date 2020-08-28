@@ -17,20 +17,22 @@ lr = 0.0001
 epoch_num = 10
 gradient_clip = False
 read_size = 1
-device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+learn_init = True
+use_multigpu = False
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-record_pth = 'runs/skiprnn'
+record_pth = 'runs/lstm'
 os.makedirs(record_pth, exist_ok=True)
 writer = SummaryWriter(record_pth)
 
 
 class Net(nn.Module):
-    def __init__(self, mode):
+    def __init__(self, mode, learn_init=False):
         super(Net, self).__init__()
         if mode == 'custom_lstm':
-            self.m = LSTM(read_size, 110, 1)
+            self.m = LSTM(read_size, 110, 1, learn_init=learn_init)
         elif mode == 'custom_rnn':
-            self.m = RNN(read_size, 110, 1)
+            self.m = RNN(read_size, 110, 1, learn_init=learn_init)
         elif mode == 'lstm':
             self.m = nn.LSTM(read_size, 110, 1)
         elif mode == 'rnn':
@@ -38,13 +40,16 @@ class Net(nn.Module):
         self.fc = nn.Linear(110, 10)
 
     def forward(self, x):
+        # x_len, bs, ic
+        x = x.permute(1, 0, 2)
         out = self.m(x)[0][-1, :, :]
         out = self.fc(out)
         return out
 
 
-net = Net(mode='custom_lstm')
-net = net.to(device)
+net = Net(mode='custom_lstm', learn_init=learn_init).to(device)
+if use_multigpu:
+    net = nn.DataParallel(net)
 
 tf = transforms.Compose([
     transforms.ToTensor(),
@@ -65,15 +70,16 @@ ce = nn.CrossEntropyLoss()
 def train(dl, epoch_num):
     net.train()
     dl_len = len(dl)
-    for x, t in tqdm(dl):
+    for i, (x, t) in enumerate(tqdm(dl)):
         cur_bs = x.shape[0]
         opt.zero_grad()
         x = x.to(device)
         t = t.to(device)
-        x = x.reshape(cur_bs, -1, read_size).permute(1, 0, 2)
+        x = x.reshape(cur_bs, -1, read_size)
 
         pred = net(x)
         loss = ce(pred, t)
+        loss = loss.mean()
         loss.backward()
         if gradient_clip != False:
         	nn.utils.clip_grad_norm_(net.parameters(), gradient_clip)
@@ -91,11 +97,12 @@ def val(dl, epoch_num):
         cur_bs = x.shape[0]
         x = x.to(device)
         t = t.to(device)
-        x = x.reshape(cur_bs, -1, read_size).permute(1, 0, 2)
+        x = x.reshape(cur_bs, -1, read_size)
 
         pred = net(x)
         pred_logit = pred.argmax(-1)
         loss = ce(pred, t)
+        loss = loss.mean()
         acc = (pred_logit == t).sum().cpu().numpy() / cur_bs
 
         loss_avg += loss

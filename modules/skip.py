@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 from .lstm import LSTMCell
 from torch.autograd import Function
+from torch.nn.init import xavier_normal_
 
 
 class STEFunction(Function):
@@ -31,7 +32,11 @@ class SkipLSTMCellBasic(nn.Module):
         self.ste = STELayer()
         self.cell = LSTMCell(ic, hc)
         self.linear = nn.Linear(hc, 1)
-        self.linear.bias.data[:] = 1.0
+
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                xavier_normal_(m.weight)
+                m.bias.data.fill_(1)
 
     def forward(self, x, u, h, c, skip=False, delta_u=None):
         # x: (bs, ic)
@@ -65,7 +70,11 @@ class SkipLSTMCell(nn.Module):
         self.ste = STELayer()
         self.cell = LSTMCell(ic, hc)
         self.linear = nn.Linear(hc, 1)
-        self.linear.bias.data[:] = 1.0
+
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                xavier_normal_(m.weight)
+                m.bias.data.fill_(1)
 
     def forward(self, x, u, h, c, skip=False, delta_u=None):
         # x: (bs, ic)
@@ -135,22 +144,58 @@ class SkipLSTMCell(nn.Module):
             new_c = new_c_s
             delta_u = delta_u_s
 
-
         n_skips_after = (0.5 / new_u).ceil() - 1  # (bs, 1)
         return new_u, (new_h, new_c), delta_u, n_skips_after
 
 
+class SkipLSTMCellNoSkip(nn.Module):
+    def __init__(self, ic, hc):
+        super(SkipLSTMCellNoSkip, self).__init__()
+        self.ste = STELayer()
+        self.cell = LSTMCell(ic, hc)
+        self.linear = nn.Linear(hc, 1)
+        
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                xavier_normal_(m.weight)
+                m.bias.data.fill_(1)
+
+    def forward(self, x, u, h, c):
+        # x: (bs, ic)
+        # u: (bs, 1)
+        # h: (bs, hc)
+        # c: (bs, hc)
+
+        # computing the states
+        binarized_u = self.ste(u)                # (bs, 1)
+        new_h, new_c = self.cell(x, h, c)  # (bs, hc), (bs, hc)
+        new_h = new_h * binarized_u + (1 - binarized_u) * h      # (bs, hc)
+        new_c = new_c * binarized_u + (1 - binarized_u) * c      # (bs, hc)
+        delta_u = torch.sigmoid(self.linear(new_c))        # (bs, 1)
+        new_u = delta_u * binarized_u + \
+            torch.clamp(u + delta_u, 0, 1) * (1 - binarized_u)  # (bs, 1)
+
+        return new_u, (new_h, new_c), delta_u
+
+
 class SkipLSTM(nn.Module):
-    def __init__(self, ic, hc, layer_num, return_total_u=False):
+    def __init__(self, ic, hc, layer_num, return_total_u=False, learn_init=False, no_skip=False):
         super(SkipLSTM, self).__init__()
         self.ic = ic
         self.hc = hc
         self.layer_num = layer_num
         self.return_total_u = return_total_u
+        self.learn_init = learn_init
+        self.no_skip = no_skip
 
-        self.cells = nn.ModuleList([SkipLSTMCell(ic, hc)])
-        for i in range(self.layer_num - 1):
-            cell = SkipLSTMCell(hc, hc)
+        if no_skip:
+            cur_cell = SkipLSTMCellNoSkip
+        else:
+            cur_cell = SkipLSTMCell
+
+        self.cells = nn.ModuleList([cur_cell(ic, hc)])
+        for _ in range(self.layer_num - 1):
+            cell = cur_cell(hc, hc)
             self.cells.append(cell)
 
     def forward(self, x, hiddens=None):
@@ -158,8 +203,13 @@ class SkipLSTM(nn.Module):
         x_len, bs, _ = x.shape    # (x_len, bs, ic)
 
         if hiddens is None:
-            h = torch.zeros(self.layer_num, bs, self.hc).to(device)        # (l, bs, hc)
-            c = torch.zeros(self.layer_num, bs, self.hc).to(device)        # (l, bs, hc)
+            if self.learn_init:
+                h = nn.Parameter(torch.randn(self.layer_num, bs, self.hc))
+                c = nn.Parameter(torch.randn(self.layer_num, bs, self.hc))
+            else:
+                h = torch.zeros(self.layer_num, bs, self.hc)
+                c = torch.zeros(self.layer_num, bs, self.hc)
+            h, c = h.to(device), c.to(device)
             u = torch.ones(self.layer_num, bs, 1).to(device)            # (l, bs, 1)
         else:
             h, c, u = hiddens
@@ -179,13 +229,21 @@ class SkipLSTM(nn.Module):
             cur_u = u[i]               # (bs, 1)
 
             for j in range(x_len):
-                # (bs, 1), ((bs, hc), (bs, hc)), (bs, 1), (bs, 1)
-                cur_u, cur_hiddens, delta_u, n_skips_after = self.cells[i](
-                    lstm_input[j], cur_u, cur_h[0], cur_c[0], skip, delta_u)
-                total_u += cur_u.mean()
-                # (bs, hc), (bs, hc)
-                cur_h, cur_c = cur_hiddens
-                skip = (n_skips_after[:, 0] > 0).tolist()
+                if self.no_skip:
+                    # (bs, 1), ((bs, hc), (bs, hc)), (bs, 1), (bs, 1)
+                    cur_u, cur_hiddens, delta_u = self.cells[i](
+                        lstm_input[j], cur_u, cur_h[0], cur_c[0])
+                    total_u += cur_u.mean()
+                    # (bs, hc), (bs, hc)
+                    cur_h, cur_c = cur_hiddens
+                else:
+                    # (bs, 1), ((bs, hc), (bs, hc)), (bs, 1), (bs, 1)
+                    cur_u, cur_hiddens, delta_u, n_skips_after = self.cells[i](
+                        lstm_input[j], cur_u, cur_h[0], cur_c[0], skip, delta_u)
+                    total_u += cur_u.mean()
+                    # (bs, hc), (bs, hc)
+                    cur_h, cur_c = cur_hiddens
+                    skip = (n_skips_after[:, 0] > 0).tolist()
 
                 # (1, bs, hc) / (1, bs, hc)
                 cur_h = cur_h.unsqueeze(0)
@@ -206,5 +264,5 @@ class SkipLSTM(nn.Module):
         cs = torch.cat(cs, dim=0)
 
         if self.return_total_u:
-        	return out, (hs, cs), total_u
+            return out, (hs, cs), total_u
         return out, (hs, cs)

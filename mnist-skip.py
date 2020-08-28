@@ -17,7 +17,10 @@ epoch_num = 10
 gradient_clip = False
 read_size = 1
 lambd = 0.00001
-device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+learn_init = True
+no_skip = False
+use_multigpu = False
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 record_pth = 'runs/skiprnn'
 os.makedirs(record_pth, exist_ok=True)
@@ -25,21 +28,25 @@ writer = SummaryWriter(record_pth)
 
 
 class Net(nn.Module):
-    def __init__(self, mode):
+    def __init__(self, mode, learn_init=False):
         super(Net, self).__init__()
         if mode == 'skip-lstm':
-            self.m = SkipLSTM(read_size, 110, 1, return_total_u=True)
+            self.m = SkipLSTM(read_size, 110, 1, return_total_u=True,
+                              learn_init=learn_init, no_skip=no_skip)
         self.fc = nn.Linear(110, 10)
 
     def forward(self, x):
+        # x_len, bs, ic
+        x = x.permute(1, 0, 2)
         out, _, total_u = self.m(x)
         out = out[-1, :, :]
         out = self.fc(out)
-        return out, total_u
+        return out, total_u[None]
 
 
-net = Net(mode='skip-lstm')
-net = net.to(device)
+net = Net(mode='skip-lstm', learn_init=learn_init).to(device)
+if use_multigpu:
+    net = nn.DataParallel(net)
 
 tf = transforms.Compose([
     transforms.ToTensor(),
@@ -65,12 +72,14 @@ def train(dl, epoch_num):
         opt.zero_grad()
         x = x.to(device)
         t = t.to(device)
-        x = x.reshape(cur_bs, -1, read_size).permute(1, 0, 2)
+        x = x.reshape(cur_bs, -1, read_size)
 
         pred, total_u = net(x)
+        total_u = total_u.mean()
         loss_ce = ce(pred, t)
         loss_budget = lambd * total_u
         loss = loss_ce + loss_budget
+        loss = loss.mean()
         loss.backward()
         if gradient_clip != False:
         	nn.utils.clip_grad_norm_(net.parameters(), gradient_clip)
@@ -89,13 +98,14 @@ def val(dl, epoch_num):
         cur_bs = x.shape[0]
         x = x.to(device)
         t = t.to(device)
-        x = x.reshape(cur_bs, -1, read_size).permute(1, 0, 2)
+        x = x.reshape(cur_bs, -1, read_size)
 
         pred, total_u = net(x)
         pred_logit = pred.argmax(-1)
         loss_ce = ce(pred, t)
         loss_budget = lambd * total_u
         loss = loss_ce + loss_budget
+        loss = loss.mean()
         acc = (pred_logit == t).sum().cpu().numpy() / cur_bs
 
         loss_avg += loss

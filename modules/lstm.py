@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from torch.nn.init import xavier_normal_
 
 
 class NaiveLSTMCell(nn.Module):
@@ -20,6 +21,11 @@ class NaiveLSTMCell(nn.Module):
         self.tanh = nn.Tanh()
         self.sig = nn.Sigmoid()
 
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                xavier_normal_(m.weight)
+                m.bias.data.fill_(0)
+
     def forward(self, x, h, c):
         forget_x = self.linears['if'](x) + self.linears['hf'](h)
         forget_gate = self.sig(forget_x)
@@ -27,7 +33,7 @@ class NaiveLSTMCell(nn.Module):
         input_x = self.linears['ii'](x) + self.linears['hi'](h)
         input_gate = self.sig(input_x)
 
-        output_x = self.linears['io'](x) + self.linears['ho'](h)
+        output_x = self.linears['ig'](x) + self.linears['hg'](h)
         output_gate = self.sig(output_x)
 
         mod_x = self.linears['im'](x) + self.linears['hm'](h)
@@ -48,6 +54,11 @@ class LSTMCell(nn.Module):
         self.tanh = nn.Tanh()
         self.sig = nn.Sigmoid()
 
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                xavier_normal_(m.weight)
+                m.bias.data.fill_(0)
+
     def forward(self, x, h, c):
         out_i, out_h = self.linear_i(x), self.linear_h(h)
         out_i, out_h = out_i.split(self.hc, 1), out_h.split(self.hc, 1)
@@ -63,11 +74,12 @@ class LSTMCell(nn.Module):
 
 
 class LSTM(nn.Module):
-    def __init__(self, ic, hc, layer_num):
+    def __init__(self, ic, hc, layer_num, learn_init=False):
         super(LSTM, self).__init__()
         self.ic = ic
         self.hc = hc
         self.layer_num = layer_num
+        self.learn_init = learn_init
 
         self.cells = nn.ModuleList([LSTMCell(ic, hc)])
         for i in range(self.layer_num - 1):
@@ -79,8 +91,13 @@ class LSTM(nn.Module):
         x_len, bs, _ = x.shape
 
         if hiddens is None:
-            h = torch.zeros(self.layer_num, bs, self.hc).to(device)
-            c = torch.zeros(self.layer_num, bs, self.hc).to(device)
+            if self.learn_init:
+                h = nn.Parameter(torch.randn(self.layer_num, bs, self.hc))
+                c = nn.Parameter(torch.randn(self.layer_num, bs, self.hc))
+            else:
+                h = torch.zeros(self.layer_num, bs, self.hc)
+                c = torch.zeros(self.layer_num, bs, self.hc)
+            h, c = h.to(device), c.to(device)
         else:
             h, c = hiddens
 

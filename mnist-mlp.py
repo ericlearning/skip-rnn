@@ -13,9 +13,10 @@ bs = 64
 lr = 0.0001
 epoch_num = 10
 gradient_clip = False
-device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+use_multigpu = False
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-record_pth = 'runs/skiprnn'
+record_pth = 'runs/mlp'
 os.makedirs(record_pth, exist_ok=True)
 writer = SummaryWriter(record_pth)
 
@@ -25,6 +26,8 @@ net = nn.Sequential(
     nn.Linear(256, 10)
 )
 net = net.to(device)
+if use_multigpu:
+    net = nn.DataParallel(net)
 
 tf = transforms.Compose([
     transforms.ToTensor(),
@@ -54,6 +57,7 @@ def train(dl, epoch_num):
 
         pred = net(x)
         loss = ce(pred, t)
+        loss = loss.mean()
         loss.backward()
         if gradient_clip != False:
         	nn.utils.clip_grad_norm_(net.parameters(), gradient_clip)
@@ -76,6 +80,7 @@ def val(dl, epoch_num):
         pred = net(x)
         pred_logit = pred.argmax(-1)
         loss = ce(pred, t)
+        loss = loss.mean()
         acc = (pred_logit == t).sum().cpu().numpy() / cur_bs
 
         loss_avg += loss

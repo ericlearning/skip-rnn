@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from torch.nn.init import xavier_normal_
 
 
 class RNNCell(nn.Module):
@@ -11,17 +12,23 @@ class RNNCell(nn.Module):
         self.linear_h = nn.Linear(hc, hc)
         self.tanh = nn.Tanh()
 
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                xavier_normal_(m.weight)
+                m.bias.data.fill_(0)
+
     def forward(self, x, h):
         h = self.tanh(self.linear_i(x) + self.linear_h(h))
         return h
 
 
 class RNN(nn.Module):
-    def __init__(self, ic, hc, layer_num):
+    def __init__(self, ic, hc, layer_num, learn_init=False):
         super(RNN, self).__init__()
         self.ic = ic
         self.hc = hc
         self.layer_num = layer_num
+        self.learn_init = learn_init
 
         self.cells = nn.ModuleList([RNNCell(ic, hc)])
         for i in range(self.layer_num - 1):
@@ -33,7 +40,11 @@ class RNN(nn.Module):
         x_len, bs, _ = x.shape
 
         if hiddens is None:
-            h = torch.zeros(self.layer_num, bs, self.hc).to(device)
+            if self.learn_init:
+                h = nn.Parameter(torch.randn(self.layer_num, bs, self.hc))
+            else:
+                h = torch.zeros(self.layer_num, bs, self.hc)
+            h = h.to(device)
         else:
             h = hiddens
 
