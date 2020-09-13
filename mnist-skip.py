@@ -7,7 +7,8 @@ from torch.utils.tensorboard import SummaryWriter
 from torchvision import datasets, transforms
 from tqdm import tqdm
 
-from modules.skip import SkipLSTM
+from modules.skipgru import SkipGRU
+from modules.skiplstm import SkipLSTM
 
 torch.backends.cudnn.benchmark = True
 
@@ -33,6 +34,9 @@ class Net(nn.Module):
         if mode == 'skip-lstm':
             self.m = SkipLSTM(read_size, 110, 1, return_total_u=True,
                               learn_init=learn_init, no_skip=no_skip)
+        elif mode == 'skip-gru':
+            self.m = SkipGRU(read_size, 110, 1, return_total_u=True,
+                             learn_init=learn_init, no_skip=no_skip)
         self.fc = nn.Linear(110, 10)
 
     def forward(self, x):
@@ -41,7 +45,7 @@ class Net(nn.Module):
         out, _, total_u = self.m(x)
         out = out[-1, :, :]
         out = self.fc(out)
-        return out, total_u[None]
+        return out, total_u
 
 
 net = Net(mode='skip-lstm', learn_init=learn_init).to(device)
@@ -75,14 +79,14 @@ def train(dl, epoch_num):
         x = x.reshape(cur_bs, -1, read_size)
 
         pred, total_u = net(x)
-        total_u = total_u.mean()
+        total_u = total_u.sum(1).mean(0)
         loss_ce = ce(pred, t)
         loss_budget = lambd * total_u
         loss = loss_ce + loss_budget
         loss = loss.mean()
         loss.backward()
         if gradient_clip != False:
-        	nn.utils.clip_grad_norm_(net.parameters(), gradient_clip)
+            nn.utils.clip_grad_norm_(net.parameters(), gradient_clip)
         opt.step()
 
         writer.add_scalar('train loss', float(loss), epoch_num * dl_len + i)
@@ -101,6 +105,7 @@ def val(dl, epoch_num):
         x = x.reshape(cur_bs, -1, read_size)
 
         pred, total_u = net(x)
+        total_u = total_u.sum(1).mean(0)
         pred_logit = pred.argmax(-1)
         loss_ce = ce(pred, t)
         loss_budget = lambd * total_u

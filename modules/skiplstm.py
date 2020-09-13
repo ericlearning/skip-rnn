@@ -1,4 +1,3 @@
-import math
 import torch
 import torch.nn as nn
 from .lstm import LSTMCell
@@ -26,17 +25,15 @@ class STELayer(nn.Module):
 
 
 class SkipLSTMCellBasic(nn.Module):
-        # This SkipLSTMCell only works when bs=1
+    # This SkipLSTMCell only works when bs=1
     def __init__(self, ic, hc):
         super(SkipLSTMCellBasic, self).__init__()
         self.ste = STELayer()
         self.cell = LSTMCell(ic, hc)
         self.linear = nn.Linear(hc, 1)
 
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                xavier_normal_(m.weight)
-                m.bias.data.fill_(1)
+        xavier_normal_(self.linear.weight)
+        self.linear.bias.data.fill_(1)
 
     def forward(self, x, u, h, c, skip=False, delta_u=None):
         # x: (bs, ic)
@@ -61,7 +58,7 @@ class SkipLSTMCellBasic(nn.Module):
             new_u = delta_u * binarized_u                    # (bs, 1)
 
         n_skips_after = (0.5 / new_u).ceil() - 1  # (bs, 1)
-        return new_u, (new_h, new_c), delta_u, n_skips_after
+        return binarized_u, new_u, (new_h, new_c), delta_u, n_skips_after
 
 
 class SkipLSTMCell(nn.Module):
@@ -71,10 +68,8 @@ class SkipLSTMCell(nn.Module):
         self.cell = LSTMCell(ic, hc)
         self.linear = nn.Linear(hc, 1)
 
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                xavier_normal_(m.weight)
-                m.bias.data.fill_(1)
+        xavier_normal_(self.linear.weight)
+        self.linear.bias.data.fill_(1)
 
     def forward(self, x, u, h, c, skip=False, delta_u=None):
         # x: (bs, ic)
@@ -145,7 +140,7 @@ class SkipLSTMCell(nn.Module):
             delta_u = delta_u_s
 
         n_skips_after = (0.5 / new_u).ceil() - 1  # (bs, 1)
-        return new_u, (new_h, new_c), delta_u, n_skips_after
+        return binarized_u, new_u, (new_h, new_c), delta_u, n_skips_after
 
 
 class SkipLSTMCellNoSkip(nn.Module):
@@ -155,10 +150,8 @@ class SkipLSTMCellNoSkip(nn.Module):
         self.cell = LSTMCell(ic, hc)
         self.linear = nn.Linear(hc, 1)
         
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                xavier_normal_(m.weight)
-                m.bias.data.fill_(1)
+        xavier_normal_(self.linear.weight)
+        self.linear.bias.data.fill_(1)
 
     def forward(self, x, u, h, c):
         # x: (bs, ic)
@@ -175,7 +168,7 @@ class SkipLSTMCellNoSkip(nn.Module):
         new_u = delta_u * binarized_u + \
             torch.clamp(u + delta_u, 0, 1) * (1 - binarized_u)  # (bs, 1)
 
-        return new_u, (new_h, new_c), delta_u
+        return binarized_u, new_u, (new_h, new_c), delta_u
 
 
 class SkipLSTM(nn.Module):
@@ -185,7 +178,6 @@ class SkipLSTM(nn.Module):
         self.hc = hc
         self.layer_num = layer_num
         self.return_total_u = return_total_u
-        self.learn_init = learn_init
         self.no_skip = no_skip
 
         if no_skip:
@@ -198,21 +190,27 @@ class SkipLSTM(nn.Module):
             cell = cur_cell(hc, hc)
             self.cells.append(cell)
 
+        self.h, self.c = self.init_hiddens(learn_init)
+
+    def init_hiddens(self, learn_init):
+        if learn_init:
+            h = nn.Parameter(torch.randn(self.layer_num, 1, self.hc))
+            c = nn.Parameter(torch.randn(self.layer_num, 1, self.hc))
+        else:
+            h = nn.Parameters(torch.zeros(self.layer_num, 1, self.hc), requires_grad=False)
+            c = nn.Parameters(torch.zeros(self.layer_num, 1, self.hc), requires_grad=False)
+        return h, c
+
     def forward(self, x, hiddens=None):
         device = x.device
         x_len, bs, _ = x.shape    # (x_len, bs, ic)
 
         if hiddens is None:
-            if self.learn_init:
-                h = nn.Parameter(torch.randn(self.layer_num, bs, self.hc))
-                c = nn.Parameter(torch.randn(self.layer_num, bs, self.hc))
-            else:
-                h = torch.zeros(self.layer_num, bs, self.hc)
-                c = torch.zeros(self.layer_num, bs, self.hc)
-            h, c = h.to(device), c.to(device)
-            u = torch.ones(self.layer_num, bs, 1).to(device)            # (l, bs, 1)
+            h, c = self.h, self.c
         else:
-            h, c, u = hiddens
+            h, c = hiddens
+        h, c = h.repeat(1, bs, 1), c.repeat(1, bs, 1)
+        u = torch.ones(self.layer_num, bs, 1).to(device)            # (l, bs, 1)
 
         hs, cs = [], []
         lstm_input = x             # (x_len, bs, ic)
@@ -220,7 +218,7 @@ class SkipLSTM(nn.Module):
         skip = [False] * bs
         delta_u = [None] * bs
 
-        total_u = 0
+        binarized_us = []
 
         for i in range(self.layer_num):
             cur_hs = []
@@ -231,16 +229,16 @@ class SkipLSTM(nn.Module):
             for j in range(x_len):
                 if self.no_skip:
                     # (bs, 1), ((bs, hc), (bs, hc)), (bs, 1), (bs, 1)
-                    cur_u, cur_hiddens, delta_u = self.cells[i](
+                    binarized_u, cur_u, cur_hiddens, delta_u = self.cells[i](
                         lstm_input[j], cur_u, cur_h[0], cur_c[0])
-                    total_u += cur_u.mean()
+                    binarized_us.append(binarized_u)
                     # (bs, hc), (bs, hc)
                     cur_h, cur_c = cur_hiddens
                 else:
                     # (bs, 1), ((bs, hc), (bs, hc)), (bs, 1), (bs, 1)
-                    cur_u, cur_hiddens, delta_u, n_skips_after = self.cells[i](
+                    binarized_u, cur_u, cur_hiddens, delta_u, n_skips_after = self.cells[i](
                         lstm_input[j], cur_u, cur_h[0], cur_c[0], skip, delta_u)
-                    total_u += cur_u.mean()
+                    binarized_us.append(binarized_u)
                     # (bs, hc), (bs, hc)
                     cur_h, cur_c = cur_hiddens
                     skip = (n_skips_after[:, 0] > 0).tolist()
@@ -255,7 +253,8 @@ class SkipLSTM(nn.Module):
             hs.append(cur_h)
             cs.append(cur_c)
 
-        total_u /= (self.layer_num * x_len)
+        # (bs, seq * layer_num)
+        total_u = torch.cat(binarized_us, 1)
         # (x_len, bs, hc)
         out = lstm_input
         # (l, bs, hc)

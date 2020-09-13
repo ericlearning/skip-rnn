@@ -8,6 +8,7 @@ from torchvision import datasets, transforms
 from tqdm import tqdm
 
 from modules.rnn import RNN
+from modules.gru import GRU
 from modules.lstm import LSTM
 
 torch.backends.cudnn.benchmark = True
@@ -31,9 +32,13 @@ class Net(nn.Module):
         super(Net, self).__init__()
         if mode == 'custom_lstm':
             self.m = LSTM(read_size, 110, 1, learn_init=learn_init)
+        elif mode == 'custom_gru':
+            self.m = GRU(read_size, 110, 1, learn_init=learn_init)
         elif mode == 'custom_rnn':
             self.m = RNN(read_size, 110, 1, learn_init=learn_init)
         elif mode == 'lstm':
+            self.m = nn.LSTM(read_size, 110, 1)
+        elif mode == 'gru':
             self.m = nn.LSTM(read_size, 110, 1)
         elif mode == 'rnn':
             self.m = nn.RNN(read_size, 110, 1)
